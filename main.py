@@ -1,6 +1,7 @@
 import os
-import sqlite3
-from datetime import date, datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import date, datetime, timedelta
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Query
@@ -9,7 +10,7 @@ from pydantic import BaseModel, Field
 from fastapi_mcp import FastApiMCP
 
 APP_NAME = "Budget Tracker MCP"
-DB_PATH = os.getenv("DB_PATH", "budget.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/budget_db")
 
 app = FastAPI(title=APP_NAME, version="1.0.0")
 
@@ -23,8 +24,7 @@ app.add_middleware(
 )
 
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
@@ -33,12 +33,12 @@ def init_db():
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS expenses (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          amount REAL NOT NULL,
-          category TEXT NOT NULL,
+          id SERIAL PRIMARY KEY,
+          amount DECIMAL(10,2) NOT NULL,
+          category VARCHAR(100) NOT NULL,
           description TEXT,
           expense_date DATE NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          created_at TIMESTAMP DEFAULT NOW()
         );
         """
     )
@@ -80,7 +80,7 @@ class MonthlySummary(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": APP_NAME, "db_path": DB_PATH}
+    return {"status": "ok", "app": APP_NAME, "database_url": DATABASE_URL}
 
 @app.post("/expenses", response_model=ExpenseOut)
 def add_expense(payload: ExpenseCreate):
@@ -95,13 +95,15 @@ def add_expense(payload: ExpenseCreate):
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO expenses (amount, category, description, expense_date) VALUES (?, ?, ?, ?)",
+        "INSERT INTO expenses (amount, category, description, expense_date) VALUES (%s, %s, %s, %s)",
         (payload.amount, payload.category.strip(), (payload.description or "").strip(), expense_date),
     )
-    expense_id = cur.lastrowid
+    cur.execute("SELECT currval('expenses_id_seq')")
+    expense_id = cur.fetchone()["currval"]
     conn.commit()
 
-    row = cur.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    cur.execute("SELECT * FROM expenses WHERE id = %s", (expense_id,))
+    row = cur.fetchone()
     conn.close()
 
     return ExpenseOut(
@@ -109,8 +111,8 @@ def add_expense(payload: ExpenseCreate):
         amount=row["amount"],
         category=row["category"],
         description=row["description"],
-        expense_date=row["expense_date"],
-        created_at=row["created_at"],
+        expense_date=str(row["expense_date"]),
+        created_at=str(row["created_at"]),
     )
 
 @app.get("/expenses", response_model=List[ExpenseOut])
@@ -136,20 +138,22 @@ def list_expenses(
     params = []
 
     if start_date:
-        sql += " AND expense_date >= ?"
+        sql += " AND expense_date >= %s"
         params.append(start_date)
     if end_date:
-        sql += " AND expense_date <= ?"
+        sql += " AND expense_date <= %s"
         params.append(end_date)
     if category:
-        sql += " AND lower(category) = lower(?)"
+        sql += " AND lower(category) = lower(%s)"
         params.append(category.strip())
 
-    sql += " ORDER BY expense_date DESC, id DESC LIMIT ? OFFSET ?"
+    sql += " ORDER BY expense_date DESC, id DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
     conn = _connect()
-    rows = conn.execute(sql, params).fetchall()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = cur.fetchall()
     conn.close()
 
     return [
@@ -158,8 +162,8 @@ def list_expenses(
             amount=r["amount"],
             category=r["category"],
             description=r["description"],
-            expense_date=r["expense_date"],
-            created_at=r["created_at"],
+            expense_date=str(r["expense_date"]),
+            created_at=str(r["created_at"]),
         )
         for r in rows
     ]
@@ -168,31 +172,33 @@ def list_expenses(
 def get_expense_by_id(expense_id: int):
     conn = _connect()
     cur = conn.cursor()
-    row = cur.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    cur.execute("SELECT * FROM expenses WHERE id = %s", (expense_id,))
+    row = cur.fetchone()
     conn.close()
-    
+
     if not row:
         raise HTTPException(status_code=404, detail="Expense not found")
-    
+
     return ExpenseOut(
         id=row["id"],
         amount=row["amount"],
         category=row["category"],
         description=row["description"],
-        expense_date=row["expense_date"],
-        created_at=row["created_at"],
+        expense_date=str(row["expense_date"]),
+        created_at=str(row["created_at"]),
     )
 
 @app.delete("/expenses/{expense_id}", response_model=DeleteResult)
 def delete_expense(expense_id: int):
     conn = _connect()
     cur = conn.cursor()
-    row = cur.execute("SELECT id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    cur.execute("SELECT id FROM expenses WHERE id = %s", (expense_id,))
+    row = cur.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Expense not found")
 
-    cur.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    cur.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
     conn.commit()
     conn.close()
     return DeleteResult(status="deleted", deleted_id=expense_id)
@@ -207,28 +213,31 @@ def get_monthly_summary(
     start = f"{year:04d}-{month:02d}-01"
     # end = last day of month (computed in python)
     if month == 12:
-        end_date = date(year + 1, 1, 1) - datetime.resolution
+        end_date = date(year + 1, 1, 1) - timedelta(days=1)
     else:
-        end_date = date(year, month + 1, 1) - datetime.resolution
+        end_date = date(year, month + 1, 1) - timedelta(days=1)
 
-    end = end_date.date().isoformat()
+    end = end_date.isoformat()
 
     conn = _connect()
-    rows = conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """
         SELECT category, ROUND(SUM(amount), 2) AS total
         FROM expenses
-        WHERE expense_date >= ? AND expense_date <= ?
+        WHERE expense_date >= %s AND expense_date <= %s
         GROUP BY category
         ORDER BY total DESC;
         """,
         (start, end),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
 
-    grand = conn.execute(
-        "SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS grand_total FROM expenses WHERE expense_date >= ? AND expense_date <= ?",
+    cur.execute(
+        "SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS grand_total FROM expenses WHERE expense_date >= %s AND expense_date <= %s",
         (start, end),
-    ).fetchone()
+    )
+    grand = cur.fetchone()
     conn.close()
 
     by_cat = [MonthlySummaryRow(category=r["category"], total=float(r["total"] or 0)) for r in rows]

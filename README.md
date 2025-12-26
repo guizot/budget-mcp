@@ -1,7 +1,7 @@
-# Budget Tracker MCP (FastAPI + SQLite)
+# Budget Tracker MCP (FastAPI + PostgreSQL)
 
 This project is a **Budget Tracker MCP server** that:
-- exposes a simple expense database (SQLite by default)
+- exposes a simple expense database (PostgreSQL)
 - provides REST endpoints (FastAPI)
 - **automatically exposes those endpoints as MCP tools** via `fastapi-mcp` at `/mcp`
 
@@ -15,9 +15,10 @@ This project is a **Budget Tracker MCP server** that:
 ## Endpoints (REST)
 - `GET /health`
 - `POST /expenses`
-- `GET /expenses?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&category=food`
+- `GET /expenses?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&category=food&limit=200&offset=0`
+- `GET /expenses/{id}`
 - `DELETE /expenses/{id}`
-- `GET /summary/monthly?year=2025&month=12`
+- `GET /summary/monthly?year=2025&month=12&currency=IDR`
 
 ## MCP
 - MCP endpoint is mounted at:
@@ -52,25 +53,22 @@ curl -X POST http://localhost:8000/expenses \
 ```
 
 ## Configure Database
-By default the server creates/uses `budget.db` in the project directory.
-
-You can override:
-- `DB_PATH` (e.g. `/data/budget.db` on Railway persistent volume)
+The server uses PostgreSQL. Set the `DATABASE_URL` environment variable.
 
 Example:
 ```bash
-export DB_PATH=/tmp/budget.db
+export DATABASE_URL=postgresql://username:password@localhost:5432/budget_db
 ```
 
 ## Deploy to Railway
 
 1. Create a new Railway project from this repo / zip upload.
-2. Set Start Command:
+2. Add a **PostgreSQL** database to your project.
+3. Set the `DATABASE_URL` environment variable to your PostgreSQL connection string.
+4. Set Start Command:
    ```bash
    uvicorn main:app --host 0.0.0.0 --port $PORT
    ```
-3. (Optional) Add a **Volume** and set:
-   - `DB_PATH=/data/budget.db`
 
 ### Procfile
 A Procfile is included for convenience:

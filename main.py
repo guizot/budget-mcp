@@ -252,7 +252,12 @@ def get_monthly_summary(
 # ---- MCP Mount ----
 # fastapi-mcp automatically converts your FastAPI endpoints into MCP tools.
 # The MCP server will be available at /mcp
-mcp = FastApiMCP(app)
+mcp = FastApiMCP(
+    app,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    )
+)
 mcp.mount()
 
 # Local dev entrypoint
